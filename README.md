@@ -121,10 +121,10 @@ const sleep = (msec) => new Promise(resolve => setTimeout(resolve, msec));
 
 ```javascript
 await subFunctionA()
-.then(res => {
+.then(async res => {
   return await subFunctionB();
 })
-.then(res => {
+.then(async res => {
   return await subFunctionC();
 })
 .then(res => {
