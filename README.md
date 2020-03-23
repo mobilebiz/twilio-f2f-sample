@@ -1,5 +1,8 @@
 # はじめに
 
+みなさん、こんにちは。
+KDDIウェブコミュニケーションズのTwilio事業部エバンジェリストの高橋です。
+
 今回は、Twilio CLIを使ったサーバーレス環境の構築の応用編①と題して、Function内から別のFunctionを呼び出す方法について説明します。
 
 Twilio CLIについては、以下の記事も御覧ください。
@@ -8,24 +11,12 @@ Twilio CLIについては、以下の記事も御覧ください。
 - [Twilio CLI（API操作編）](https://qiita.com/mobilebiz/private/0c687a1cd66772885d6e)
 - [Twilio CLI（サーバーレス開発編）](https://qiita.com/mobilebiz/items/fb4439bf162098e345ae)
 
-## セットアップ
-
-```sh
-git clone https://github.com/mobilebiz/twilio-f2f-sample.git
-cd twilio-f2f-sample.git
-npm install
-cp .env.sample .env
-```
-
-`.env`ファイルをエディタで開き、ご自分の環境に併せてACCOUNT_SIDとAUTH_TOKENを修正します。  
-このACCOUNT_SID/AUTH_TOKENには、別のサーバーレスで生成されたAPIキーとシークレットを使ってください。
-
-## Functionから別のFunctionを呼び出す
+# Functionから別のFunctionを呼び出す
 
 一つのFunctionにすべての機能を実装することもできなくはないですが、可読性が悪くなったり、メンテナンスがしにくくなることを考えると、どうしても複数のFunctionに処理を分割して管理したくなります。
 そこで今回は、Functionから別のFunctionを呼び出すベストプラクティスについて解説します。
 
-### ケース1. PublicなFunctionを呼び出す
+## ケース1. PublicなFunctionを呼び出す
 
 Twilio Functionsを使ったことがある方ならご存知かと思いますが、Twilio Functionsを実行するときのセキュリティ対策として、Signatureチェックをするかどうかが選択できます。
 詳しくは、[こちらの記事](https://qiita.com/mobilebiz/items/f8a8c795d5187e67166a)に解説があります。
@@ -69,19 +60,90 @@ const sleep = (msec) => new Promise(resolve => setTimeout(resolve, msec));
 
 また、このやり方では、呼び出し元のFunctionが呼ばれたときのObject変数（contextやevent）は、呼び出し先のFunctionに引き継がれるわけではないので気をつけてください。
 
-### ケース2. 呼び出し先のFunctionを外部から見えないようにする
+## ケース2. ProtectedなFunctionを呼び出す
 
 ケース１では、呼び出し先のFunctionに関しては、URLがわかってしまえば単独で呼び出しが可能です。実運用環境では、呼び出し先を直接呼び出されると予期しない動作をする可能性もありますし、そもそもセキュリティ的にもあまり勧められません。
-そこで呼び出し先のFunctionを外部からは直接実行できないようにする方法を説明します。
+そこで、SignatureチェックされるFunction（ProtectedなFunction）を呼び出す方法も説明します。
 
-ケース２のサンプルコードはたとえば以下のようになります。このケースでは、呼び出し先のFunctionを、functionsディレクトリではなく、assetsディレクトリ内に作成するところがポイントです。
+ケース2のサンプルコードは、たとえば以下のようになります。3行目のtokenは、ご自分のTwilioアカウントに紐づく`AUTH TOKEN`を指定してください。
 
 🔻呼び出し元のFunction（functions/main2.js）
 
 ```javascript
+const rp = require('request-promise');
+exports.handler = async function(context, event, callback) {
+  const token = 'xxxxxxxxxxxxxxxxxxxxxxxxx';  // Your Twilio AuthToken
+  const url = `https://${context.DOMAIN_NAME}/subFunction2`;
+  const params = {
+    hoge: 'hoge'
+  };
+  const signature = getSignature(url, params, token);
+  const options = {
+    method: 'POST',
+    uri: url,
+    form: params,
+    headers: {
+      'X-Twilio-Signature': signature 
+    }
+  }
+  await rp(options)
+  .then(res => {
+    console.log(`res: ${res}`);
+    callback(null, 'main2 done.');
+  })
+  .catch(err => {
+    // callback(err); // これだと、main2自体がエラーで終了する
+    callback(null, err.message);  // エラーにはせず、エラーメッセージだけを返す
+  });
+};
+
+const getSignature = (url, params, token) => {
+  const crypto = require('crypto');
+
+  // パラメータを並び替えて、URLに連結した文字列を生成
+  if (params !== null) {
+    Object.keys(params).sort().forEach(key => {
+      url = url + key + params[key];
+    });
+  }
+
+  // X-Twilio-Signatureの生成
+  const signature = crypto.createHmac('sha1', token).update(Buffer.from(url, 'utf-8')).digest('Base64');
+
+  console.log(signature);
+  return signature;
+};
+```
+
+🔻呼び出し先のFunction（functions/subFunction2.protected.js）
+
+```javascript
+exports.handler = async function(context, event, callback) {
+  console.log('subFunction2 start.');
+  await sleep(1000);
+  console.log('subFunction2 end.');
+  callback (null, 'subFunction2 Done.');  // 正常終了
+  // callback (new Error('Fake error.'));    // 擬似的にエラーを発生
+};
+
+const sleep = (msec) => new Promise(resolve => setTimeout(resolve, msec));
+```
+
+呼び出し先のコード自体はケース1と同じですが、ファイル名に、`.protected`が付与されている点に注意してください。このように、Function名に`.protected`が含まれる場合、このFunctionはSignatureチェックを受けます。
+そのため、呼び出し時のヘッダーに、URLとパラメータをもとに`X-Twilio-Signature`を計算して付与しています。この値が不一致の場合、`ERROR 403`（Signature不一致）が表示されて呼び出しは失敗します。
+
+## ケース3. プライベートなAssetsを利用して、コードを外部から見えないようにする
+
+ケース2と同じように、プライベートなAssetsを使って呼び出し先のFunctionを外部からは直接実行できないようにする方法を説明します。
+
+ケース3のサンプルコードはたとえば以下のようになります。このケースでは、呼び出し先のFunctionを、functionsディレクトリではなく、assetsディレクトリ内に作成するところがポイントです。
+
+🔻呼び出し元のFunction（functions/main3.js）
+
+```javascript
 exports.handler = async function(context, event, callback) {
   const assets = Runtime.getAssets();
-  const subFunctionAsset = assets['/subFunction2.js'];
+  const subFunctionAsset = assets['/subFunction3.js'];
   const subFunctionPath = subFunctionAsset.path;
   const subFunction = require(subFunctionPath);
   await subFunction()
@@ -91,13 +153,13 @@ exports.handler = async function(context, event, callback) {
   })
   .catch(err => {
     console.log(err);
-    // callback(err); // これだと、main2自体がエラーで終了する
+    // callback(err); // これだと、main3自体がエラーで終了する
     callback(null, err.message);  // エラーにはせず、エラーメッセージだけを返す
   });
 };
 ```
 
-🔻呼び出し先のFunction（assets/subFunction2.private.js）
+🔻呼び出し先のFunction（assets/subFunction3.private.js）
 
 ```javascript
 module.exports = subFunction = () => {
@@ -113,8 +175,7 @@ module.exports = subFunction = () => {
 const sleep = (msec) => new Promise(resolve => setTimeout(resolve, msec));
 ```
 
-本来、ProtectedなFunctionにするには、functionsディレクトリ内に、`function名.protected.js`という名前で作成するのですが、このように作ってしまうと、ケース１のやり方で呼び出すと`ERROR 403`（Signature不一致）が出てしまってうまくいきません。
-そこで、コード自体をAssetsに格納して、それをコード上に読み込む方法をとります。Assetsに格納したコードはプライベートモードで保存する（ファイル名の拡張子の前に、`.private`をつける）ため外部からは見えません。ただし、プライベートモードで格納されているコードであっても、読み込む時は.privateは不要である点に気をつけてください。
+このケースはコード自体をAssetsに格納して、それをコード上に読み込む方法をとっています。Assetsに格納したコードはプライベートモードで保存する（ファイル名の拡張子の前に、`.private`をつける）ため外部からは見えません。ただし、プライベートモードで格納されているコードであっても、読み込む時は.privateは不要である点に気をつけてください。また、Twilioの仕様上プライベートなAssetsは10個しか保存できません。
 
 このサンプルコードでは、呼び出し先のFunctionをPromise形式で作成しているため、呼び出し先で何らかのエラーが発生した場合に、エラーとして呼び出し元に通知することができます。
 このようにしておくことで、例えば次のコードのように、呼び出し先が複数ある場合などでもネストが少ないシンプルなコーディングができるのでおすすめです。
